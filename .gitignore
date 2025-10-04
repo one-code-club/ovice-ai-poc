@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+build/
+
+# Env and local
+.env
+.env.local
+*.log
+
+# OS/Editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Artifacts (必要なら適宜調整)
+artifacts/*.webm
+artifacts/*.mp4

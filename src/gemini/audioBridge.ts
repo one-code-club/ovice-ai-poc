@@ -155,9 +155,21 @@ export class AudioBridge {
         // ontrackイベントをインターセプト
         pc.addEventListener('track', (event) => {
           console.log('[oVice → Gemini] 📡 トラックイベント:', event.track.kind, event.track.label);
+          console.log('[oVice → Gemini] 📡 event.streams:', event.streams ? event.streams.length + '個' : 'なし');
+          console.log('[oVice → Gemini] 📡 event.streams[0]:', event.streams && event.streams[0] ? 'あり' : 'なし');
           
-          if (event.track.kind === 'audio' && event.streams && event.streams[0]) {
-            console.log('[oVice → Gemini] 🎤 リモート音声トラックを検出！');
+          if (event.track.kind === 'audio') {
+            console.log('[oVice → Gemini] 🎤 音声トラックを検出！');
+            
+            // ストリームを取得（event.streamsまたは新規作成）
+            let stream;
+            if (event.streams && event.streams[0]) {
+              console.log('[oVice → Gemini] event.streamsからストリームを使用');
+              stream = event.streams[0];
+            } else {
+              console.log('[oVice → Gemini] event.streamsが空なので、新しいMediaStreamを作成');
+              stream = new MediaStream([event.track]);
+            }
             
             // AudioContextを作成（初回のみ）
             if (!remoteAudioContext) {
@@ -166,7 +178,6 @@ export class AudioBridge {
             }
             
             try {
-              const stream = event.streams[0];
               const source = remoteAudioContext.createMediaStreamSource(stream);
               const processor = remoteAudioContext.createScriptProcessor(4096, 1, 1);
               // ダミーのGainNode（ScriptProcessorを動作させるために必要だが音は出さない）

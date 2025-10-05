@@ -47,6 +47,7 @@ export class AudioBridge {
         const audioContext = new AudioContext({ sampleRate });
         w.__geminiAudioContext = audioContext;
         w.__geminiAudioQueue = [];
+        w.__geminiAudioBuffer = new Float32Array(0);
         
         // AudioContextを明示的にresumeする
         audioContext.resume().then(() => {
@@ -59,6 +60,10 @@ export class AudioBridge {
         const streamDestination = audioContext.createMediaStreamDestination();
         const outputStream = streamDestination.stream;
 
+        // 音声バッファ（連続した音声データを保持）
+        w.__geminiAudioBuffer = new Float32Array(0);
+        let totalSamplesProcessed = 0;
+        
         // ScriptProcessorNodeで音声データを処理
         const bufferSize = 4096;
         const processor = audioContext.createScriptProcessor(bufferSize, 0, 1);
@@ -67,12 +72,12 @@ export class AudioBridge {
           const outputBuffer = e.outputBuffer;
           const outputData = outputBuffer.getChannelData(0);
           
-          // キューから音声データを取り出す
-          if (w.__geminiAudioQueue.length > 0) {
+          // キューから新しい音声データをバッファに追加
+          while (w.__geminiAudioQueue.length > 0) {
             const base64Audio = w.__geminiAudioQueue.shift();
             
-            // Base64をArrayBufferに変換
             try {
+              // Base64をArrayBufferに変換
               const binaryString = atob(base64Audio);
               const bytes = new Uint8Array(binaryString.length);
               for (let i = 0; i < binaryString.length; i++) {
@@ -81,14 +86,53 @@ export class AudioBridge {
               
               // PCM16データをFloat32に変換
               const int16Array = new Int16Array(bytes.buffer);
-              for (let i = 0; i < outputData.length && i < int16Array.length; i++) {
-                outputData[i] = int16Array[i] / 32768.0; // -1.0 ~ 1.0に正規化
+              const float32Data = new Float32Array(int16Array.length);
+              for (let i = 0; i < int16Array.length; i++) {
+                float32Data[i] = int16Array[i] / 32768.0; // -1.0 ~ 1.0に正規化
               }
               
-              console.log('[oVice] 🔊 Gemini音声を処理: ' + int16Array.length + 'サンプル, キュー残: ' + w.__geminiAudioQueue.length);
+              // 既存バッファと新しいデータを結合
+              const newBuffer = new Float32Array(w.__geminiAudioBuffer.length + float32Data.length);
+              newBuffer.set(w.__geminiAudioBuffer);
+              newBuffer.set(float32Data, w.__geminiAudioBuffer.length);
+              w.__geminiAudioBuffer = newBuffer;
+              
+              if (totalSamplesProcessed === 0) {
+                console.log('[oVice] 🔊 最初のGemini音声チャンクを受信: ' + int16Array.length + 'サンプル');
+              }
             } catch (error) {
               console.error('[oVice] Gemini音声のデコードに失敗:', error);
             }
+          }
+          
+          // バッファから必要な分だけ出力にコピー
+          if (w.__geminiAudioBuffer.length >= outputData.length) {
+            // バッファに十分なデータがある
+            for (let i = 0; i < outputData.length; i++) {
+              outputData[i] = w.__geminiAudioBuffer[i];
+            }
+            
+            // 使用した分をバッファから削除
+            w.__geminiAudioBuffer = w.__geminiAudioBuffer.slice(outputData.length);
+            totalSamplesProcessed += outputData.length;
+            
+            if (totalSamplesProcessed % (sampleRate * 5) < bufferSize) {
+              // 約5秒ごとにログ出力
+              console.log('[oVice] 🔊 Gemini音声を再生中: ' + 
+                Math.floor(totalSamplesProcessed / sampleRate) + '秒経過, ' +
+                'バッファ残: ' + w.__geminiAudioBuffer.length + 'サンプル, ' +
+                'キュー: ' + w.__geminiAudioQueue.length + '個');
+            }
+          } else if (w.__geminiAudioBuffer.length > 0) {
+            // バッファにデータが少しある場合、残りを無音で埋める
+            for (let i = 0; i < w.__geminiAudioBuffer.length; i++) {
+              outputData[i] = w.__geminiAudioBuffer[i];
+            }
+            for (let i = w.__geminiAudioBuffer.length; i < outputData.length; i++) {
+              outputData[i] = 0;
+            }
+            totalSamplesProcessed += w.__geminiAudioBuffer.length;
+            w.__geminiAudioBuffer = new Float32Array(0);
           } else {
             // データがない場合は無音
             outputData.fill(0);

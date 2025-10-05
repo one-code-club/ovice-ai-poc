@@ -94,8 +94,9 @@ async function main(): Promise<void> {
         muted: track.muted
       }));
       
-      // キューの状態
+      // キューとバッファの状態
       const queueLength = w.__geminiAudioQueue?.length || 0;
+      const bufferLength = w.__geminiAudioBuffer?.length || 0;
       
       // マイクボタンの状態
       const micButton = document.querySelector('button[aria-label="microphone"]');
@@ -108,6 +109,7 @@ async function main(): Promise<void> {
         hasStream,
         trackStates,
         queueLength,
+        bufferLength,
         micButtonColor,
         micButtonAriaPressed
       };
@@ -118,6 +120,7 @@ async function main(): Promise<void> {
     console.log('Geminiストリーム存在:', micDiagnostics.hasStream);
     console.log('ストリームトラック:', JSON.stringify(micDiagnostics.trackStates, null, 2));
     console.log('音声キューの長さ:', micDiagnostics.queueLength);
+    console.log('音声バッファの長さ:', micDiagnostics.bufferLength, 'サンプル');
     console.log('マイクボタン色:', micDiagnostics.micButtonColor);
     console.log('マイクボタン aria-pressed:', micDiagnostics.micButtonAriaPressed);
     console.log('=========================\n');
@@ -129,11 +132,13 @@ async function main(): Promise<void> {
         const w = window as any;
         return {
           queueLength: w.__geminiAudioQueue?.length || 0,
+          bufferLength: w.__geminiAudioBuffer?.length || 0,
           audioContextState: w.__geminiAudioContext?.state,
           processorNode: !!w.__geminiAudioContext?.destination
         };
       });
       console.log('音声キューの長さ:', laterDiagnostics.queueLength);
+      console.log('音声バッファの長さ:', laterDiagnostics.bufferLength, 'サンプル');
       console.log('AudioContext状態:', laterDiagnostics.audioContextState);
       console.log('=========================\n');
     }, 5000);

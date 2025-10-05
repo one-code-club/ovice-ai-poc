@@ -3,6 +3,7 @@ import { createBrowserSession } from '../browser/session.js';
 import { loginAndPrepare } from '../ovice/login.js';
 import { GeminiLiveClient } from '../gemini/client.js';
 import { AudioBridge } from '../gemini/audioBridge.js';
+import { SYSTEM_INSTRUCTIONS } from '../gemini/systemInstructions.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -17,7 +18,7 @@ async function main(): Promise<void> {
   const geminiClient = new GeminiLiveClient({
     apiKey,
     modelName: process.env.GEMINI_MODEL_NAME,
-    systemInstructions: process.env.GEMINI_SYSTEM_INSTRUCTIONS,
+    systemInstructions: SYSTEM_INSTRUCTIONS,
     voiceName: process.env.GEMINI_VOICE_NAME,
     temperature: process.env.GEMINI_TEMPERATURE ? parseFloat(process.env.GEMINI_TEMPERATURE) : undefined,
     topP: process.env.GEMINI_TOP_P ? parseFloat(process.env.GEMINI_TOP_P) : undefined

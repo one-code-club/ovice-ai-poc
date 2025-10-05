@@ -1,7 +1,7 @@
 /**
- * Gemini Live APIに渡すシステム指示
+ * リアルタイム音声API（Gemini/OpenAI）に渡すシステム指示
  * 
- * この指示によってGeminiの振る舞いや役割を定義します。
+ * この指示によってAIの振る舞いや役割を定義します。
  */
 export const SYSTEM_INSTRUCTIONS = `
 # Role

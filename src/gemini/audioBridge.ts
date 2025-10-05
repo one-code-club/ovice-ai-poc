@@ -1,33 +1,35 @@
 import { Page } from 'playwright';
-import { GeminiLiveClient } from './client.js';
+import { type RealtimeVoiceClient } from '../realtime/types.js';
 
 export interface AudioBridgeConfig {
   audioSelector: string; // oViceのスピーカー音声要素のセレクタ
-  inputSampleRate?: number; // 入力サンプルレート（デフォルト: 16000Hz）
-  outputSampleRate?: number; // 出力サンプルレート（デフォルト: 16000Hz）
+  inputSampleRate?: number; // 入力サンプルレート
+  outputSampleRate?: number; // 出力サンプルレート
 }
 
 /**
- * oViceとGemini Live API間の音声ブリッジ
+ * oViceとリアルタイム音声API間の音声ブリッジ
  */
 export class AudioBridge {
   private page: Page;
-  private geminiClient: GeminiLiveClient;
+  private voiceClient: RealtimeVoiceClient;
   private config: Required<AudioBridgeConfig>;
+  private readonly providerLabel: string;
   private isRunning = false;
   private audioDataQueue: string[] = []; // ページ準備前の音声データを一時保存
   private audioChunkCount = 0;
   private sendAudioFunctionExposed = false;
   private readonly remoteQueueFlushLimit = 5;
-  private readonly geminiQueueLimit = 60;
+  private readonly queueLimit = 60;
 
-  constructor(page: Page, geminiClient: GeminiLiveClient, config: AudioBridgeConfig) {
+  constructor(page: Page, voiceClient: RealtimeVoiceClient, config: AudioBridgeConfig) {
     this.page = page;
-    this.geminiClient = geminiClient;
+    this.voiceClient = voiceClient;
+    this.providerLabel = voiceClient.getProviderLabel();
     this.config = {
       audioSelector: config.audioSelector,
-      inputSampleRate: config.inputSampleRate ?? 16000,
-      outputSampleRate: config.outputSampleRate ?? 16000
+      inputSampleRate: config.inputSampleRate ?? voiceClient.getPreferredSampleRate(),
+      outputSampleRate: config.outputSampleRate ?? voiceClient.getPreferredSampleRate()
     };
   }
 
@@ -36,34 +38,35 @@ export class AudioBridge {
       return;
     }
 
-    console.log('📡 sendAudioToGemini 関数を公開中...');
-    await this.page.exposeFunction('sendAudioToGemini', (base64Audio: string, mimeType: string) => {
+    const functionName = 'sendAudioToRealtime';
+    console.log(`📡 ${functionName} 関数を公開中...`);
+    await this.page.exposeFunction(functionName, (base64Audio: string, mimeType: string) => {
       this.audioChunkCount++;
 
       if (this.audioChunkCount === 1) {
         console.log('🎉 最初の音声チャンクを受信しました！');
       }
 
-      if (this.geminiClient.isConnected()) {
-        this.geminiClient.sendAudio(base64Audio, mimeType);
+      if (this.voiceClient.isConnected()) {
+        this.voiceClient.sendAudio(base64Audio, mimeType);
 
         if (this.audioChunkCount <= 5 || this.audioChunkCount % 50 === 0) {
-          console.log(`🎤 oVice → Gemini: ${this.audioChunkCount}個目の音声チャンクを送信 (${base64Audio.length}文字)`);
+          console.log(`🎤 oVice → ${this.voiceClient.getProviderLabel()}: ${this.audioChunkCount}個目の音声チャンクを送信 (${base64Audio.length}文字)`);
         }
       } else if (this.audioChunkCount % 10 === 0) {
-        console.warn(`⚠ Geminiクライアントが接続されていないため、音声を送信できません (${this.audioChunkCount}個目)`);
+        console.warn(`⚠ ${this.voiceClient.getProviderLabel()}クライアントが接続されていないため、音声を送信できません (${this.audioChunkCount}個目)`);
       }
     });
 
     this.sendAudioFunctionExposed = true;
-    console.log('✓ sendAudioToGemini 関数を公開しました');
+    console.log(`✓ ${functionName} 関数を公開しました`);
   }
 
   private async flushRemoteAudioQueue(): Promise<void> {
-    const { flushedCount, droppedCount } = await this.page.evaluate(({ limit }) => {
+    const { flushedCount, droppedCount } = await this.page.evaluate(({ limit, functionName }) => {
       const w = window as any;
 
-      if (!Array.isArray(w.__remoteAudioQueue) || typeof w.sendAudioToGemini !== 'function') {
+      if (!Array.isArray(w.__remoteAudioQueue) || typeof w[functionName] !== 'function') {
         return { flushedCount: 0, droppedCount: 0 };
       }
 
@@ -77,11 +80,11 @@ export class AudioBridge {
       const items = queue.splice(0, queue.length);
 
       for (const audioData of items) {
-        w.sendAudioToGemini(audioData, 'audio/pcm');
+        w[functionName](audioData, 'audio/pcm');
       }
 
       return { flushedCount: items.length, droppedCount: dropCount };
-    }, { limit: this.remoteQueueFlushLimit });
+    }, { limit: this.remoteQueueFlushLimit, functionName: 'sendAudioToRealtime' });
 
     if (droppedCount > 0) {
       console.warn(`⚠ remoteAudioQueue 内の古い音声チャンク ${droppedCount}個を破棄しました`);
@@ -92,15 +95,15 @@ export class AudioBridge {
     }
   }
 
-  private async enqueueGeminiAudioInBrowser(audioData: string): Promise<void> {
+  private async enqueueRealtimeAudioInBrowser(audioData: string): Promise<void> {
     await this.page.evaluate(
       ({ data, limit, logInterval, warningThresholdMultiplier }) => {
         const w = window as any;
-        if (!w.__geminiAudioQueue) {
-          w.__geminiAudioQueue = [];
+        if (!w.__realtimeAudioQueue) {
+          w.__realtimeAudioQueue = [];
         }
 
-        const queue: string[] = w.__geminiAudioQueue;
+        const queue: string[] = w.__realtimeAudioQueue;
         queue.push(data);
 
         const queueSize = queue.length;
@@ -108,23 +111,23 @@ export class AudioBridge {
         if (queueSize > limit) {
           const dropped = queueSize - limit;
           queue.splice(0, dropped);
-          console.warn(`[oVice] ⚠ Gemini音声キューが上限(${limit})を超えたため ${dropped} 個を破棄しました`);
+          console.warn(`[oVice] ⚠ Realtime音声キューが上限(${limit})を超えたため ${dropped} 個を破棄しました`);
         }
 
         if (logInterval > 0 && queueSize % logInterval === 0) {
-          console.log(`[oVice] 📦 Gemini音声データをキューに追加 (キュー長: ${queueSize})`);
+          console.log(`[oVice] 📦 Realtime音声データをキューに追加 (キュー長: ${queueSize})`);
         }
 
         if (queueSize > limit * warningThresholdMultiplier) {
           console.warn(
-            `[oVice] ⚠ Gemini音声キューがしきい値を超過: サイズ=${queueSize}, 上限=${limit}`
+            `[oVice] ⚠ Realtime音声キューがしきい値を超過: サイズ=${queueSize}, 上限=${limit}`
           );
         }
       },
       {
         data: audioData,
-        limit: this.geminiQueueLimit,
-        logInterval: Math.max(5, Math.floor(this.geminiQueueLimit / 6)),
+        limit: this.queueLimit,
+        logInterval: Math.max(5, Math.floor(this.queueLimit / 6)),
         warningThresholdMultiplier: 0.8
       }
     );
@@ -147,28 +150,33 @@ export class AudioBridge {
       console.log('[oVice] 🚀 Init script内部開始');
       
       // 初期化処理をDOMContentLoaded後に実行
-      const initGeminiStream = () => {
-        console.log('[oVice] 🎵 Geminiストリームを初期化中...');
+      const initRealtimeStream = () => {
+        console.log('[oVice] 🎵 Realtimeストリームを初期化中...');
         
         // AudioContextを作成
         const audioContext = new AudioContext({ sampleRate });
+        w.__realtimeAudioContext = audioContext;
+        w.__realtimeAudioQueue = [];
+        w.__realtimeAudioBuffer = new Float32Array(0);
+        
+        // 後方互換性のため旧名も設定
         w.__geminiAudioContext = audioContext;
-        w.__geminiAudioQueue = [];
-        w.__geminiAudioBuffer = new Float32Array(0);
+        w.__geminiAudioQueue = w.__realtimeAudioQueue;
+        w.__geminiAudioBuffer = w.__realtimeAudioBuffer;
         
         // AudioContextを明示的にresumeする
         audioContext.resume().then(() => {
           console.log('[oVice] AudioContextがresumeされました:', audioContext.state);
         });
         
-        console.log('[oVice] Gemini用AudioContextを作成:', audioContext.sampleRate, 'Hz');
+        console.log('[oVice] Realtime用AudioContextを作成:', audioContext.sampleRate, 'Hz');
 
-        // Gemini音声を再生するための音声ストリーム生成
+        // Realtime音声を再生するための音声ストリーム生成
         const streamDestination = audioContext.createMediaStreamDestination();
         const outputStream = streamDestination.stream;
 
         // 音声バッファ（連続した音声データを保持）
-        w.__geminiAudioBuffer = new Float32Array(0);
+        w.__realtimeAudioBuffer = new Float32Array(0);
         let totalSamplesProcessed = 0;
         
         // ScriptProcessorNodeで音声データを処理
@@ -180,8 +188,8 @@ export class AudioBridge {
           const outputData = outputBuffer.getChannelData(0);
           
           // キューから新しい音声データをバッファに追加
-          while (w.__geminiAudioQueue.length > 0) {
-            const base64Audio = w.__geminiAudioQueue.shift();
+          while (w.__realtimeAudioQueue.length > 0) {
+            const base64Audio = w.__realtimeAudioQueue.shift();
             
             try {
               // Base64をArrayBufferに変換
@@ -199,52 +207,52 @@ export class AudioBridge {
               }
               
               // 既存バッファと新しいデータを結合
-              const newBuffer = new Float32Array(w.__geminiAudioBuffer.length + float32Data.length);
-              newBuffer.set(w.__geminiAudioBuffer);
-              newBuffer.set(float32Data, w.__geminiAudioBuffer.length);
-              w.__geminiAudioBuffer = newBuffer;
-              if (w.__geminiAudioBuffer.length > MAX_BUFFER_LENGTH) {
-                const overflow = w.__geminiAudioBuffer.length - MAX_BUFFER_LENGTH;
-                w.__geminiAudioBuffer = w.__geminiAudioBuffer.slice(overflow);
-                console.warn('[oVice] ⚠ Gemini再生バッファが' + MAX_BUFFER_GROWTH_SECONDS + '秒を超えたため、古いデータを ' + overflow + ' サンプル切り捨てました');
+              const newBuffer = new Float32Array(w.__realtimeAudioBuffer.length + float32Data.length);
+              newBuffer.set(w.__realtimeAudioBuffer);
+              newBuffer.set(float32Data, w.__realtimeAudioBuffer.length);
+              w.__realtimeAudioBuffer = newBuffer;
+              if (w.__realtimeAudioBuffer.length > MAX_BUFFER_LENGTH) {
+                const overflow = w.__realtimeAudioBuffer.length - MAX_BUFFER_LENGTH;
+                w.__realtimeAudioBuffer = w.__realtimeAudioBuffer.slice(overflow);
+                console.warn('[oVice] ⚠ Realtime再生バッファが' + MAX_BUFFER_GROWTH_SECONDS + '秒を超えたため、古いデータを ' + overflow + ' サンプル切り捨てました');
               }
               
               if (totalSamplesProcessed === 0) {
-                console.log('[oVice] 🔊 最初のGemini音声チャンクを受信: ' + int16Array.length + 'サンプル');
+                console.log('[oVice] 🔊 最初のRealtime音声チャンクを受信: ' + int16Array.length + 'サンプル');
               }
             } catch (error) {
-              console.error('[oVice] Gemini音声のデコードに失敗:', error);
+              console.error('[oVice] Realtime音声のデコードに失敗:', error);
             }
           }
           
           // バッファから必要な分だけ出力にコピー
-          if (w.__geminiAudioBuffer.length >= outputData.length) {
+          if (w.__realtimeAudioBuffer.length >= outputData.length) {
             // バッファに十分なデータがある
             for (let i = 0; i < outputData.length; i++) {
-              outputData[i] = w.__geminiAudioBuffer[i];
+              outputData[i] = w.__realtimeAudioBuffer[i];
             }
             
             // 使用した分をバッファから削除
-            w.__geminiAudioBuffer = w.__geminiAudioBuffer.slice(outputData.length);
+            w.__realtimeAudioBuffer = w.__realtimeAudioBuffer.slice(outputData.length);
             totalSamplesProcessed += outputData.length;
             
             if (totalSamplesProcessed % (sampleRate * 5) < bufferSize) {
               // 約5秒ごとにログ出力
-              console.log('[oVice] 🔊 Gemini音声を再生中: ' + 
+              console.log('[oVice] 🔊 Realtime音声を再生中: ' + 
                 Math.floor(totalSamplesProcessed / sampleRate) + '秒経過, ' +
-                'バッファ残: ' + w.__geminiAudioBuffer.length + 'サンプル, ' +
-                'キュー: ' + w.__geminiAudioQueue.length + '個');
+                'バッファ残: ' + w.__realtimeAudioBuffer.length + 'サンプル, ' +
+                'キュー: ' + w.__realtimeAudioQueue.length + '個');
             }
-          } else if (w.__geminiAudioBuffer.length > 0) {
+          } else if (w.__realtimeAudioBuffer.length > 0) {
             // バッファにデータが少しある場合、残りを無音で埋める
-            for (let i = 0; i < w.__geminiAudioBuffer.length; i++) {
-              outputData[i] = w.__geminiAudioBuffer[i];
+            for (let i = 0; i < w.__realtimeAudioBuffer.length; i++) {
+              outputData[i] = w.__realtimeAudioBuffer[i];
             }
-            for (let i = w.__geminiAudioBuffer.length; i < outputData.length; i++) {
+            for (let i = w.__realtimeAudioBuffer.length; i < outputData.length; i++) {
               outputData[i] = 0;
             }
-            totalSamplesProcessed += w.__geminiAudioBuffer.length;
-            w.__geminiAudioBuffer = new Float32Array(0);
+            totalSamplesProcessed += w.__realtimeAudioBuffer.length;
+            w.__realtimeAudioBuffer = new Float32Array(0);
           } else {
             // データがない場合は無音
             outputData.fill(0);
@@ -256,9 +264,10 @@ export class AudioBridge {
         // processor.connect(audioContext.destination);
         
         // マイクストリームとして保存
-        w.__geminiMicStream = outputStream;
+        w.__realtimeMicStream = outputStream;
+        w.__geminiMicStream = outputStream; // 後方互換性
         
-        console.log('[oVice] ✓ Gemini音声再生ストリームを作成しました。トラック:', outputStream.getAudioTracks().map((t) => t.label));
+        console.log('[oVice] ✓ Realtime音声再生ストリームを作成しました。トラック:', outputStream.getAudioTracks().map((t) => t.label));
       };
 
       // getUserMediaをオーバーライド（ページロード前に実行）
@@ -274,16 +283,16 @@ export class AudioBridge {
         w.__getUserMediaCalled = true;
         
         // 初回呼び出し時にストリームを初期化
-        if (!w.__geminiMicStream) {
-          console.log('[oVice] getUserMediaでGeminiストリームを初期化中...');
-          initGeminiStream();
+        if (!w.__realtimeMicStream) {
+          console.log('[oVice] getUserMediaでRealtimeストリームを初期化中...');
+          initRealtimeStream();
         }
         
-        if (constraints?.audio && w.__geminiMicStream) {
-          console.log('[oVice] 🎙️ ✅ マイク要求をGeminiストリームで応答します！');
-          console.log('[oVice] 返すストリームのトラック:', w.__geminiMicStream.getAudioTracks().map((t) => ({ id: t.id, label: t.label, enabled: t.enabled })));
-          // Geminiストリームを返す
-          return Promise.resolve(w.__geminiMicStream);
+        if (constraints?.audio && w.__realtimeMicStream) {
+          console.log('[oVice] 🎙️ ✅ マイク要求をRealtimeストリームで応答します！');
+          console.log('[oVice] 返すストリームのトラック:', w.__realtimeMicStream.getAudioTracks().map((t) => ({ id: t.id, label: t.label, enabled: t.enabled })));
+          // Realtimeストリームを返す
+          return Promise.resolve(w.__realtimeMicStream);
         }
         
         console.log('[oVice] 通常のgetUserMediaを使用します。');
@@ -298,11 +307,12 @@ export class AudioBridge {
       const OriginalRTCPeerConnection = window.RTCPeerConnection;
       let remoteAudioContext = null;
       
-      // sendAudioToGeminiが利用可能になるまでキューに保存
+      // sendAudioToRealtimeが利用可能になるまでキューに保存
       w.__remoteAudioQueue = w.__remoteAudioQueue || [];
       
       window.RTCPeerConnection = function(...args) {
-        console.log('[oVice → Gemini] 🔗 新しいRTCPeerConnectionが作成されました');
+        const providerLabel = window.__realtimeProviderLabel || 'Realtime';
+        console.log('[oVice → ' + providerLabel + '] 🔗 新しいRTCPeerConnectionが作成されました');
         const pc = new OriginalRTCPeerConnection(...args);
         
         // オリジナルのontrackcallbackを保存
@@ -310,27 +320,27 @@ export class AudioBridge {
         
         // ontrackイベントをインターセプト
         pc.addEventListener('track', (event) => {
-          console.log('[oVice → Gemini] 📡 トラックイベント:', event.track.kind, event.track.label);
-          console.log('[oVice → Gemini] 📡 event.streams:', event.streams ? event.streams.length + '個' : 'なし');
-          console.log('[oVice → Gemini] 📡 event.streams[0]:', event.streams && event.streams[0] ? 'あり' : 'なし');
+          console.log('[oVice → ' + providerLabel + '] 📡 トラックイベント:', event.track.kind, event.track.label);
+          console.log('[oVice → ' + providerLabel + '] 📡 event.streams:', event.streams ? event.streams.length + '個' : 'なし');
+          console.log('[oVice → ' + providerLabel + '] 📡 event.streams[0]:', event.streams && event.streams[0] ? 'あり' : 'なし');
           
           if (event.track.kind === 'audio') {
-            console.log('[oVice → Gemini] 🎤 音声トラックを検出！');
+            console.log('[oVice → ' + providerLabel + '] 🎤 音声トラックを検出！');
             
             // ストリームを取得（event.streamsまたは新規作成）
             let stream;
             if (event.streams && event.streams[0]) {
-              console.log('[oVice → Gemini] event.streamsからストリームを使用');
+              console.log('[oVice → ' + providerLabel + '] event.streamsからストリームを使用');
               stream = event.streams[0];
             } else {
-              console.log('[oVice → Gemini] event.streamsが空なので、新しいMediaStreamを作成');
+              console.log('[oVice → ' + providerLabel + '] event.streamsが空なので、新しいMediaStreamを作成');
               stream = new MediaStream([event.track]);
             }
             
             // AudioContextを作成（初回のみ）
             if (!remoteAudioContext) {
               remoteAudioContext = new AudioContext({ sampleRate });
-              console.log('[oVice → Gemini] リモート音声用AudioContextを作成 (sampleRate: ' + sampleRate + 'Hz)');
+              console.log('[oVice → ' + providerLabel + '] リモート音声用AudioContextを作成 (sampleRate: ' + sampleRate + 'Hz)');
             }
             
             try {
@@ -344,7 +354,7 @@ export class AudioBridge {
               processor.onaudioprocess = (e) => {
                 processCount++;
                 if (processCount === 1) {
-                  console.log('[oVice → Gemini] 🎤 WebRTC音声処理が開始されました');
+                  console.log('[oVice → ' + providerLabel + '] 🎤 WebRTC音声処理が開始されました');
                 }
                 
                 const inputBuffer = e.inputBuffer;
@@ -362,7 +372,7 @@ export class AudioBridge {
                 }
                 
                 if (hasAudio && processCount % 100 === 0) {
-                  console.log('[oVice → Gemini] 🎤 音声データ検出 (' + processCount + '回目, max: ' + maxAmplitude.toFixed(3) + ')');
+                  console.log('[oVice → ' + providerLabel + '] 🎤 音声データ検出 (' + processCount + '回目, max: ' + maxAmplitude.toFixed(3) + ')');
                 }
                 
                 // Float32ArrayをPCM16に変換
@@ -381,8 +391,8 @@ export class AudioBridge {
                 const base64 = btoa(binary);
                 
                 // Node側に送信（関数が利用可能な場合）またはキューに保存
-                if (w.sendAudioToGemini) {
-                  w.sendAudioToGemini(base64, 'audio/pcm');
+                if (w.sendAudioToRealtime) {
+                  w.sendAudioToRealtime(base64, 'audio/pcm');
                 } else {
                   // まだ関数が利用できない場合はキューに保存（最大1000個まで）
                   w.__remoteAudioQueue.push(base64);
@@ -391,7 +401,7 @@ export class AudioBridge {
                     w.__remoteAudioQueue.splice(0, dropCount);
                   }
                   if (processCount === 1) {
-                    console.warn('[oVice → Gemini] ⚠ sendAudioToGemini関数がまだ利用できません。キューに保存します');
+                    console.warn('[oVice → ' + providerLabel + '] ⚠ sendAudioToRealtime関数がまだ利用できません。キューに保存します');
                   }
                 }
               };
@@ -401,9 +411,9 @@ export class AudioBridge {
               dummyGain.connect(remoteAudioContext.destination);
               // ダミーのGainは音量0なのでエコーなし、Gemini音声とも競合しない
               
-              console.log('[oVice → Gemini] ✅ WebRTC音声キャプチャを開始しました（エコーなしモード）');
+              console.log('[oVice → ' + providerLabel + '] ✅ WebRTC音声キャプチャを開始しました（エコーなしモード）');
             } catch (error) {
-              console.error('[oVice → Gemini] ❌ 音声キャプチャ設定失敗:', error);
+              console.error('[oVice → ' + providerLabel + '] ❌ 音声キャプチャ設定失敗:', error);
             }
           }
         });
@@ -420,14 +430,14 @@ export class AudioBridge {
    * ログイン前のセットアップ（音声ハンドラを設定）
    */
   async setupBeforeLogin(): Promise<void> {
-    console.log('🎙️ Gemini音声ハンドラーを設定中...');
+    console.log(`🎙️ ${this.providerLabel}音声ハンドラーを設定中...`);
     await this.ensureSendAudioFunctionExposed();
     
     // Geminiクライアントからの音声を受け取る
-    this.geminiClient.onAudioMessage(async (audioData: string) => {
+    this.voiceClient.onAudioMessage(async (audioData: string) => {
       // ブラウザのキューに音声データを追加（エラーハンドリング付き）
       try {
-        await this.enqueueGeminiAudioInBrowser(audioData);
+        await this.enqueueRealtimeAudioInBrowser(audioData);
       } catch (error: any) {
         // ページナビゲーション中などでevaluateが失敗した場合
         if (error.message?.includes('Execution context was destroyed')) {
@@ -439,7 +449,7 @@ export class AudioBridge {
       }
     });
     
-    console.log('✓ Gemini音声ハンドラーの設定が完了しました。');
+    console.log(`✓ ${this.providerLabel}音声ハンドラーの設定が完了しました。`);
   }
 
   /**
@@ -452,7 +462,7 @@ export class AudioBridge {
     }
 
     console.log('\n========================================');
-    console.log('🎙️ oVice ⇄ Gemini音声ブリッジを完成させます...');
+    console.log(`🎙️ oVice ⇄ ${this.providerLabel}音声ブリッジを完成させます...`);
     console.log('========================================');
 
     // 溜まっていた音声データをブラウザに送信
@@ -460,7 +470,7 @@ export class AudioBridge {
       console.log(`📦 溜まっていた音声データ ${this.audioDataQueue.length}個をブラウザに送信中...`);
       for (const audioData of this.audioDataQueue) {
         try {
-          await this.enqueueGeminiAudioInBrowser(audioData);
+          await this.enqueueRealtimeAudioInBrowser(audioData);
         } catch (error) {
           console.warn('溜まっていた音声データの送信に失敗:', error);
         }
@@ -470,14 +480,14 @@ export class AudioBridge {
     }
 
     // oViceスピーカーからGeminiへの音声ストリームを設定（オプション）
-    console.log('🎤 oVice→Gemini音声ストリームを設定中...');
+    console.log(`🎤 oVice→${this.providerLabel}音声ストリームを設定中...`);
     try {
-      await this.setupOViceToGeminiStream();
+      await this.setupOViceToRealtimeStream();
       console.log('✓ 双方向音声ブリッジが開始されました。');
     } catch (error: any) {
-      console.error('❌ oVice→Gemini音声ストリームの設定に失敗しました:');
+      console.error(`❌ oVice→${this.providerLabel}音声ストリームの設定に失敗しました:`);
       console.error('エラー詳細:', error.message || error);
-      console.log('ℹ Gemini→oViceの片方向モードで続行します（GeminiがoViceで話せます）');
+      console.log(`ℹ ${this.providerLabel}→oViceの片方向モードで続行します（${this.providerLabel}がoViceで話せます）`);
     }
 
     this.isRunning = true;
@@ -495,8 +505,8 @@ export class AudioBridge {
   /**
    * oViceのスピーカー音声をGeminiに送る
    */
-  private async setupOViceToGeminiStream(): Promise<void> {
-    console.log('\n🔧 === setupOViceToGeminiStream 開始 ===');
+  private async setupOViceToRealtimeStream(): Promise<void> {
+    console.log('\n🔧 === setupOViceToRealtimeStream 開始 ===');
     
     await this.ensureSendAudioFunctionExposed();
     await this.flushRemoteAudioQueue();
@@ -571,29 +581,30 @@ export class AudioBridge {
     // ブラウザ内でスピーカー音声をキャプチャ
     console.log('🎧 ブラウザ内で音声キャプチャを設定中...');
     await this.page.evaluate(
-      ({ audioSelector, sampleRate }) => {
-        console.log(`[oVice → Gemini] セレクタ "${audioSelector}" で音声要素を検索中...`);
+      ({ audioSelector, sampleRate, functionName, providerLabel }) => {
+        (window as any).__realtimeProviderLabel = providerLabel;
+        console.log(`[oVice → ${providerLabel}] セレクタ "${audioSelector}" で音声要素を検索中...`);
         const audioElement = document.querySelector(audioSelector) as HTMLMediaElement;
         
         if (!audioElement) {
-          console.error(`[oVice → Gemini] ❌ 音声要素が見つかりません: ${audioSelector}`);
+          console.error(`[oVice → ${providerLabel}] ❌ 音声要素が見つかりません: ${audioSelector}`);
           throw new Error(`音声要素が見つかりません: ${audioSelector}`);
         }
 
-        console.log('[oVice → Gemini] ✓ oViceスピーカー要素を検出しました:', audioElement);
-        console.log('[oVice → Gemini] 要素の状態: paused=' + audioElement.paused + ', muted=' + audioElement.muted + ', volume=' + audioElement.volume);
+        console.log(`[oVice → ${providerLabel}] ✓ oViceスピーカー要素を検出しました:`, audioElement);
+        console.log(`[oVice → ${providerLabel}] 要素の状態: paused=${audioElement.paused}, muted=${audioElement.muted}, volume=${audioElement.volume}`);
 
         // AudioContextでキャプチャ
-        console.log('[oVice → Gemini] AudioContextを作成中... (sampleRate: ' + sampleRate + 'Hz)');
+        console.log(`[oVice → ${providerLabel}] AudioContextを作成中... (sampleRate: ${sampleRate}Hz)`);
         const audioContext = new AudioContext({ sampleRate });
         let source: MediaElementAudioSourceNode;
 
         try {
-          console.log('[oVice → Gemini] MediaElementSourceNodeを作成中...');
+          console.log(`[oVice → ${providerLabel}] MediaElementSourceNodeを作成中...`);
           source = audioContext.createMediaElementSource(audioElement);
-          console.log('[oVice → Gemini] ✓ MediaElementSourceNodeを作成しました');
+          console.log(`[oVice → ${providerLabel}] ✓ MediaElementSourceNodeを作成しました`);
         } catch (error) {
-          console.error('[oVice → Gemini] ❌ MediaElementSourceの作成に失敗:', error);
+          console.error(`[oVice → ${providerLabel}] ❌ MediaElementSourceの作成に失敗:`, error);
           throw error;
         }
 
@@ -605,7 +616,7 @@ export class AudioBridge {
         processor.onaudioprocess = (e) => {
           processCount++;
           if (processCount === 1) {
-            console.log('[oVice → Gemini] 🎤 音声処理が開始されました');
+            console.log(`[oVice → ${providerLabel}] 🎤 音声処理が開始されました`);
           }
           
           const inputBuffer = e.inputBuffer;
@@ -621,7 +632,7 @@ export class AudioBridge {
           }
 
           if (hasAudio && processCount % 100 === 0) {
-            console.log(`[oVice → Gemini] 🎤 音声データを検出 (${processCount}回目)`);
+            console.log(`[oVice → ${providerLabel}] 🎤 音声データを検出 (${processCount}回目)`);
           }
 
           // Float32ArrayをPCM16に変換
@@ -640,15 +651,15 @@ export class AudioBridge {
           const base64 = btoa(binary);
 
           // Node側に送信
-          (window as any).sendAudioToGemini(base64, 'audio/pcm');
+          (window as any)[functionName]?.(base64, 'audio/pcm');
         };
 
-        console.log('[oVice → Gemini] 🔗 音声ノードを接続中...');
+        console.log(`[oVice → ${providerLabel}] 🔗 音声ノードを接続中...`);
         source.connect(processor);
         processor.connect(audioContext.destination); // スピーカーにも出力
-        console.log('[oVice → Gemini] ✓ 音声ノードを接続しました');
+        console.log(`[oVice → ${providerLabel}] ✓ 音声ノードを接続しました`);
         
-        console.log('[oVice → Gemini] ✅ oVice → Geminiストリームを設定しました。音声処理を開始します...');
+        console.log(`[oVice → ${providerLabel}] ✅ oVice → ${providerLabel}ストリームを設定しました。音声処理を開始します...`);
 
         // クリーンアップ用
         (window as any).__oviceAudioCleanup = () => {
@@ -657,11 +668,16 @@ export class AudioBridge {
           audioContext.close();
         };
       },
-      { audioSelector: this.config.audioSelector, sampleRate: this.config.inputSampleRate }
+      {
+        audioSelector: this.config.audioSelector,
+        sampleRate: this.config.inputSampleRate,
+        functionName: 'sendAudioToRealtime',
+        providerLabel: this.providerLabel
+      }
     );
 
-    console.log('✓ oVice → Gemini音声ストリームを設定しました。');
-    console.log('=== setupOViceToGeminiStream 完了 ===\n');
+    console.log(`✓ oVice → ${this.providerLabel}音声ストリームを設定しました。`);
+    console.log('=== setupOViceToRealtimeStream 完了 ===\n');
   }
 
   /**
@@ -672,8 +688,9 @@ export class AudioBridge {
     
     // ブラウザ内でWebRTCのPeerConnectionを監視
     await this.page.evaluate(
-      ({ sampleRate }) => {
-        console.log('[oVice → Gemini] WebRTC音声キャプチャを設定中...');
+      ({ sampleRate, functionName, providerLabel }) => {
+        console.log(`[oVice → ${providerLabel}] WebRTC音声キャプチャを設定中...`);
+        (window as any).__realtimeProviderLabel = providerLabel;
         
         // RTCPeerConnectionのトラック追加を監視
         const OriginalRTCPeerConnection = window.RTCPeerConnection;
@@ -682,27 +699,27 @@ export class AudioBridge {
         
         // @ts-ignore
         window.RTCPeerConnection = function(...args) {
-          console.log('[oVice → Gemini] 新しいRTCPeerConnection が作成されました');
+          console.log(`[oVice → ${providerLabel}] 新しいRTCPeerConnection が作成されました`);
           const pc = new OriginalRTCPeerConnection(...args);
           
           // トラックが追加されたときに音声をキャプチャ
           pc.ontrack = (event) => {
-            console.log('[oVice → Gemini] トラックを検出:', event.track.kind);
+            console.log(`[oVice → ${providerLabel}] トラックを検出:`, event.track.kind);
             
             if (event.track.kind === 'audio') {
-              console.log('[oVice → Gemini] 🎤 音声トラックを検出！キャプチャを開始します');
+              console.log(`[oVice → ${providerLabel}] 🎤 音声トラックを検出！キャプチャを開始します`);
               
               // MediaStreamから音声をキャプチャ
               const stream = event.streams[0];
               if (!stream) {
-                console.error('[oVice → Gemini] ストリームが見つかりません');
+                console.error(`[oVice → ${providerLabel}] ストリームが見つかりません`);
                 return;
               }
               
               // AudioContextを作成（初回のみ）
               if (!audioContext) {
                 audioContext = new AudioContext({ sampleRate });
-                console.log('[oVice → Gemini] AudioContextを作成しました (sampleRate: ' + sampleRate + 'Hz)');
+                console.log(`[oVice → ${providerLabel}] AudioContextを作成しました (sampleRate: ${sampleRate}Hz)`);
               }
               
               try {
@@ -713,7 +730,7 @@ export class AudioBridge {
                 processor.onaudioprocess = (e) => {
                   processCount++;
                   if (processCount === 1) {
-                    console.log('[oVice → Gemini] 🎤 WebRTC音声処理が開始されました');
+                    console.log(`[oVice → ${providerLabel}] 🎤 WebRTC音声処理が開始されました`);
                   }
                   
                   const inputBuffer = e.inputBuffer;
@@ -729,7 +746,7 @@ export class AudioBridge {
                   }
                   
                   if (hasAudio && processCount % 100 === 0) {
-                    console.log(`[oVice → Gemini] 🎤 音声データを検出 (${processCount}回目)`);
+                    console.log(`[oVice → ${providerLabel}] 🎤 音声データを検出 (${processCount}回目)`);
                   }
                   
                   // Float32ArrayをPCM16に変換
@@ -748,16 +765,16 @@ export class AudioBridge {
                   const base64 = btoa(binary);
                   
                   // Node側に送信
-                  (window as any).sendAudioToGemini(base64, 'audio/pcm');
+                  (window as any)[functionName]?.(base64, 'audio/pcm');
                 };
                 
                 source.connect(processor);
                 processor.connect(audioContext.destination);
                 activeProcessors.push(processor);
                 
-                console.log('[oVice → Gemini] ✅ WebRTC音声キャプチャを開始しました');
+                console.log(`[oVice → ${providerLabel}] ✅ WebRTC音声キャプチャを開始しました`);
               } catch (error) {
-                console.error('[oVice → Gemini] ❌ 音声キャプチャの設定に失敗:', error);
+                console.error(`[oVice → ${providerLabel}] ❌ 音声キャプチャの設定に失敗:`, error);
               }
             }
           };
@@ -769,12 +786,16 @@ export class AudioBridge {
         setTimeout(() => {
           // @ts-ignore
           const peerConnections = window.peerConnections || [];
-          console.log('[oVice → Gemini] 既存のPeerConnection数:', peerConnections.length);
+          console.log(`[oVice → ${providerLabel}] 既存のPeerConnection数:`, peerConnections.length);
         }, 1000);
         
-        console.log('[oVice → Gemini] ✓ RTCPeerConnectionの監視を開始しました');
+        console.log(`[oVice → ${providerLabel}] ✓ RTCPeerConnectionの監視を開始しました`);
       },
-      { sampleRate: this.config.inputSampleRate }
+      {
+        sampleRate: this.config.inputSampleRate,
+        functionName: 'sendAudioToRealtime',
+        providerLabel: this.providerLabel
+      }
     );
     
     console.log('✓ WebRTC音声キャプチャを設定しました');

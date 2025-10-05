@@ -1,5 +1,7 @@
 import { config as loadEnv } from 'dotenv';
 import path from 'node:path';
+import { SYSTEM_INSTRUCTIONS } from './gemini/systemInstructions.js';
+import { type RealtimeProvider, type RealtimeVoiceConfig } from './realtime/types.js';
 
 loadEnv();
 
@@ -32,6 +34,7 @@ export interface AppConfig {
   browser: BrowserConfig;
   audio: AudioCaptureConfig;
   selectors: UiSelectors;
+  realtime: RealtimeVoiceConfig;
 }
 
 function requiredEnv(name: string): string {
@@ -73,6 +76,7 @@ export function loadConfig(): AppConfig {
   const defaultAudioPath = path.resolve(process.cwd(), 'artifacts', 'ovice-audio.webm');
   const email = requiredEnv('OVICE_EMAIL');
   const password = requiredEnv('OVICE_PASSWORD');
+  const realtimeProvider = (process.env.REALTIME_PROVIDER ?? 'GEMINI').toUpperCase() as RealtimeProvider;
 
   return {
     baseUrl: process.env.OVICE_BASE_URL ?? 'https://occ.ovice.in',
@@ -125,7 +129,43 @@ export function loadConfig(): AppConfig {
         'button svg[class*="speaker"]',
         'button:has(svg):has-text("speaker")'
       ]
-    }
+    },
+    realtime: buildRealtimeConfig(realtimeProvider)
   };
+}
+
+function buildRealtimeConfig(provider: RealtimeProvider): RealtimeVoiceConfig {
+  switch (provider) {
+    case 'GEMINI': {
+      const apiKey = requiredEnv('GEMINI_API_KEY');
+      return {
+        provider,
+        gemini: {
+          apiKey,
+          modelName: process.env.GEMINI_MODEL_NAME ?? 'models/gemini-2.0-flash-exp',
+          voiceName: process.env.GEMINI_VOICE_NAME ?? 'Puck',
+          temperature: process.env.GEMINI_TEMPERATURE ? Number.parseFloat(process.env.GEMINI_TEMPERATURE) : 0.7,
+          topP: process.env.GEMINI_TOP_P ? Number.parseFloat(process.env.GEMINI_TOP_P) : 0.9,
+          systemInstructions: SYSTEM_INSTRUCTIONS
+        }
+      };
+    }
+    case 'OPENAI': {
+      const apiKey = requiredEnv('OPENAI_API_KEY');
+      return {
+        provider,
+        openai: {
+          apiKey,
+          model: process.env.OPENAI_REALTIME_MODEL ?? 'gpt-4o-realtime-preview',
+          voice: process.env.OPENAI_REALTIME_VOICE ?? 'alloy',
+          temperature: process.env.OPENAI_REALTIME_TEMPERATURE ? Number.parseFloat(process.env.OPENAI_REALTIME_TEMPERATURE) : 0.7,
+          topP: process.env.OPENAI_REALTIME_TOP_P ? Number.parseFloat(process.env.OPENAI_REALTIME_TOP_P) : 0.9,
+          systemInstructions: SYSTEM_INSTRUCTIONS
+        }
+      };
+    }
+    default:
+      throw new Error(`未対応のリアルタイムプロバイダです: ${provider}`);
+  }
 }
 

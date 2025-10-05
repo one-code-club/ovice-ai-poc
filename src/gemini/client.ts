@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { type RealtimeAudioMessageHandler, type RealtimeErrorHandler, type RealtimeVoiceClient } from '../realtime/types.js';
 
 export interface GeminiConfig {
   apiKey: string;
@@ -17,15 +18,15 @@ export interface AudioChunk {
 type MessageHandler = (audioData: string) => void;
 type ErrorHandler = (error: Error) => void;
 
-export class GeminiLiveClient {
+export class GeminiLiveClient implements RealtimeVoiceClient {
   private ws: WebSocket | null = null;
   private config: Required<GeminiConfig>;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = Infinity; // oViceセッションが続く限り再接続
   private reconnectDelay = 2000; // 2秒
   private isIntentionallyClosed = false;
-  private messageHandler: MessageHandler | null = null;
-  private errorHandler: ErrorHandler | null = null;
+  private messageHandler: RealtimeAudioMessageHandler | null = null;
+  private errorHandler: RealtimeErrorHandler | null = null;
   private isSessionStarted = false;
   private audioSendCount = 0;
 
@@ -245,14 +246,14 @@ export class GeminiLiveClient {
   /**
    * 音声メッセージハンドラを設定
    */
-  onAudioMessage(handler: MessageHandler): void {
+  onAudioMessage(handler: RealtimeAudioMessageHandler): void {
     this.messageHandler = handler;
   }
 
   /**
    * エラーハンドラを設定
    */
-  onError(handler: ErrorHandler): void {
+  onError(handler: RealtimeErrorHandler): void {
     this.errorHandler = handler;
   }
 
@@ -295,5 +296,17 @@ export class GeminiLiveClient {
    */
   isConnected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN && this.isSessionStarted;
+  }
+
+  getPreferredInputMimeType(): string {
+    return 'audio/pcm';
+  }
+
+  getPreferredSampleRate(): number {
+    return 24000;
+  }
+
+  getProviderLabel(): string {
+    return 'Gemini';
   }
 }

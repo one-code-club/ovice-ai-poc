@@ -16,6 +16,10 @@ export class AudioBridge {
   private config: Required<AudioBridgeConfig>;
   private isRunning = false;
   private audioDataQueue: string[] = []; // ページ準備前の音声データを一時保存
+  private audioChunkCount = 0;
+  private sendAudioFunctionExposed = false;
+  private readonly remoteQueueFlushLimit = 5;
+  private readonly geminiQueueLimit = 60;
 
   constructor(page: Page, geminiClient: GeminiLiveClient, config: AudioBridgeConfig) {
     this.page = page;
@@ -27,6 +31,105 @@ export class AudioBridge {
     };
   }
 
+  private async ensureSendAudioFunctionExposed(): Promise<void> {
+    if (this.sendAudioFunctionExposed) {
+      return;
+    }
+
+    console.log('📡 sendAudioToGemini 関数を公開中...');
+    await this.page.exposeFunction('sendAudioToGemini', (base64Audio: string, mimeType: string) => {
+      this.audioChunkCount++;
+
+      if (this.audioChunkCount === 1) {
+        console.log('🎉 最初の音声チャンクを受信しました！');
+      }
+
+      if (this.geminiClient.isConnected()) {
+        this.geminiClient.sendAudio(base64Audio, mimeType);
+
+        if (this.audioChunkCount <= 5 || this.audioChunkCount % 50 === 0) {
+          console.log(`🎤 oVice → Gemini: ${this.audioChunkCount}個目の音声チャンクを送信 (${base64Audio.length}文字)`);
+        }
+      } else if (this.audioChunkCount % 10 === 0) {
+        console.warn(`⚠ Geminiクライアントが接続されていないため、音声を送信できません (${this.audioChunkCount}個目)`);
+      }
+    });
+
+    this.sendAudioFunctionExposed = true;
+    console.log('✓ sendAudioToGemini 関数を公開しました');
+  }
+
+  private async flushRemoteAudioQueue(): Promise<void> {
+    const { flushedCount, droppedCount } = await this.page.evaluate(({ limit }) => {
+      const w = window as any;
+
+      if (!Array.isArray(w.__remoteAudioQueue) || typeof w.sendAudioToGemini !== 'function') {
+        return { flushedCount: 0, droppedCount: 0 };
+      }
+
+      const queue: string[] = w.__remoteAudioQueue;
+      const dropCount = Math.max(0, queue.length - limit);
+
+      if (dropCount > 0) {
+        queue.splice(0, dropCount);
+      }
+
+      const items = queue.splice(0, queue.length);
+
+      for (const audioData of items) {
+        w.sendAudioToGemini(audioData, 'audio/pcm');
+      }
+
+      return { flushedCount: items.length, droppedCount: dropCount };
+    }, { limit: this.remoteQueueFlushLimit });
+
+    if (droppedCount > 0) {
+      console.warn(`⚠ remoteAudioQueue 内の古い音声チャンク ${droppedCount}個を破棄しました`);
+    }
+
+    if (flushedCount > 0) {
+      console.log(`✓ remoteAudioQueue から最新 ${flushedCount}個の音声チャンクを送信しました`);
+    }
+  }
+
+  private async enqueueGeminiAudioInBrowser(audioData: string): Promise<void> {
+    await this.page.evaluate(
+      ({ data, limit, logInterval, warningThresholdMultiplier }) => {
+        const w = window as any;
+        if (!w.__geminiAudioQueue) {
+          w.__geminiAudioQueue = [];
+        }
+
+        const queue: string[] = w.__geminiAudioQueue;
+        queue.push(data);
+
+        const queueSize = queue.length;
+
+        if (queueSize > limit) {
+          const dropped = queueSize - limit;
+          queue.splice(0, dropped);
+          console.warn(`[oVice] ⚠ Gemini音声キューが上限(${limit})を超えたため ${dropped} 個を破棄しました`);
+        }
+
+        if (logInterval > 0 && queueSize % logInterval === 0) {
+          console.log(`[oVice] 📦 Gemini音声データをキューに追加 (キュー長: ${queueSize})`);
+        }
+
+        if (queueSize > limit * warningThresholdMultiplier) {
+          console.warn(
+            `[oVice] ⚠ Gemini音声キューがしきい値を超過: サイズ=${queueSize}, 上限=${limit}`
+          );
+        }
+      },
+      {
+        data: audioData,
+        limit: this.geminiQueueLimit,
+        logInterval: Math.max(5, Math.floor(this.geminiQueueLimit / 6)),
+        warningThresholdMultiplier: 0.8
+      }
+    );
+  }
+
   /**
    * Init scriptの内容を取得（BrowserContext作成時に使用）
    */
@@ -34,6 +137,10 @@ export class AudioBridge {
     // 関数本体を文字列として返す（即時実行関数として）
     return `(() => {
       const sampleRate = ${sampleRate};
+      const REMOTE_QUEUE_LIMIT = 12;
+      const PROCESSOR_BUFFER_SIZE = 1024;
+      const MAX_BUFFER_GROWTH_SECONDS = 30;
+      const MAX_BUFFER_LENGTH = sampleRate * MAX_BUFFER_GROWTH_SECONDS;
       console.log('[oVice] 🚀 Init script開始 (sampleRate: ' + sampleRate + 'Hz)');
       (function() {
       const w = window;
@@ -65,7 +172,7 @@ export class AudioBridge {
         let totalSamplesProcessed = 0;
         
         // ScriptProcessorNodeで音声データを処理
-        const bufferSize = 4096;
+        const bufferSize = PROCESSOR_BUFFER_SIZE;
         const processor = audioContext.createScriptProcessor(bufferSize, 0, 1);
         
         processor.onaudioprocess = (e) => {
@@ -96,6 +203,11 @@ export class AudioBridge {
               newBuffer.set(w.__geminiAudioBuffer);
               newBuffer.set(float32Data, w.__geminiAudioBuffer.length);
               w.__geminiAudioBuffer = newBuffer;
+              if (w.__geminiAudioBuffer.length > MAX_BUFFER_LENGTH) {
+                const overflow = w.__geminiAudioBuffer.length - MAX_BUFFER_LENGTH;
+                w.__geminiAudioBuffer = w.__geminiAudioBuffer.slice(overflow);
+                console.warn('[oVice] ⚠ Gemini再生バッファが' + MAX_BUFFER_GROWTH_SECONDS + '秒を超えたため、古いデータを ' + overflow + ' サンプル切り捨てました');
+              }
               
               if (totalSamplesProcessed === 0) {
                 console.log('[oVice] 🔊 最初のGemini音声チャンクを受信: ' + int16Array.length + 'サンプル');
@@ -273,8 +385,10 @@ export class AudioBridge {
                   w.sendAudioToGemini(base64, 'audio/pcm');
                 } else {
                   // まだ関数が利用できない場合はキューに保存（最大1000個まで）
-                  if (w.__remoteAudioQueue.length < 1000) {
-                    w.__remoteAudioQueue.push(base64);
+                  w.__remoteAudioQueue.push(base64);
+                  if (w.__remoteAudioQueue.length > REMOTE_QUEUE_LIMIT) {
+                    const dropCount = w.__remoteAudioQueue.length - REMOTE_QUEUE_LIMIT;
+                    w.__remoteAudioQueue.splice(0, dropCount);
                   }
                   if (processCount === 1) {
                     console.warn('[oVice → Gemini] ⚠ sendAudioToGemini関数がまだ利用できません。キューに保存します');
@@ -307,22 +421,13 @@ export class AudioBridge {
    */
   async setupBeforeLogin(): Promise<void> {
     console.log('🎙️ Gemini音声ハンドラーを設定中...');
+    await this.ensureSendAudioFunctionExposed();
     
     // Geminiクライアントからの音声を受け取る
     this.geminiClient.onAudioMessage(async (audioData: string) => {
       // ブラウザのキューに音声データを追加（エラーハンドリング付き）
       try {
-        await this.page.evaluate((data) => {
-          const w = window as any;
-          if (!w.__geminiAudioQueue) {
-            w.__geminiAudioQueue = [];
-          }
-          const queueLengthBefore = w.__geminiAudioQueue.length;
-          w.__geminiAudioQueue.push(data);
-          if (queueLengthBefore % 10 === 0) {  // 10個ごとにログ
-            console.log(`[oVice] 📦 Gemini音声データをキューに追加 (キュー長: ${w.__geminiAudioQueue.length})`);
-          }
-        }, audioData);
+        await this.enqueueGeminiAudioInBrowser(audioData);
       } catch (error: any) {
         // ページナビゲーション中などでevaluateが失敗した場合
         if (error.message?.includes('Execution context was destroyed')) {
@@ -355,13 +460,7 @@ export class AudioBridge {
       console.log(`📦 溜まっていた音声データ ${this.audioDataQueue.length}個をブラウザに送信中...`);
       for (const audioData of this.audioDataQueue) {
         try {
-          await this.page.evaluate((data) => {
-            const w = window as any;
-            if (!w.__geminiAudioQueue) {
-              w.__geminiAudioQueue = [];
-            }
-            w.__geminiAudioQueue.push(data);
-          }, audioData);
+          await this.enqueueGeminiAudioInBrowser(audioData);
         } catch (error) {
           console.warn('溜まっていた音声データの送信に失敗:', error);
         }
@@ -398,50 +497,9 @@ export class AudioBridge {
    */
   private async setupOViceToGeminiStream(): Promise<void> {
     console.log('\n🔧 === setupOViceToGeminiStream 開始 ===');
-    let audioChunkCount = 0;
     
-    // ページ内でoViceの音声をキャプチャしてNode側に送る関数を公開
-    console.log('📡 sendAudioToGemini 関数を公開中...');
-    await this.page.exposeFunction('sendAudioToGemini', (base64Audio: string, mimeType: string) => {
-      audioChunkCount++;
-      if (audioChunkCount === 1) {
-        console.log('🎉 最初の音声チャンクを受信しました！');
-      }
-      if (this.geminiClient.isConnected()) {
-        this.geminiClient.sendAudio(base64Audio, mimeType);
-        if (audioChunkCount <= 5 || audioChunkCount % 50 === 0) {  // 最初の5個と50チャンクごとにログ
-          console.log(`🎤 oVice → Gemini: ${audioChunkCount}個目の音声チャンクを送信 (${base64Audio.length}文字)`);
-        }
-      } else {
-        if (audioChunkCount % 10 === 0) {
-          console.warn(`⚠ Geminiクライアントが接続されていないため、音声を送信できません (${audioChunkCount}個目)`);
-        }
-      }
-    });
-    console.log('✓ sendAudioToGemini 関数を公開しました');
-    
-    // キューに溜まっていたリモート音声データを送信
-    const queuedAudioCount = await this.page.evaluate(() => {
-      const w = window as any;
-      const queue = w.__remoteAudioQueue || [];
-      const count = queue.length;
-      
-      if (count > 0) {
-        console.log(`[oVice → Gemini] キューに溜まっていた音声データ ${count}個を送信中...`);
-        for (const audioData of queue) {
-          if (w.sendAudioToGemini) {
-            w.sendAudioToGemini(audioData, 'audio/pcm');
-          }
-        }
-        w.__remoteAudioQueue = [];
-      }
-      
-      return count;
-    });
-    
-    if (queuedAudioCount > 0) {
-      console.log(`✓ キューに溜まっていた ${queuedAudioCount}個の音声データを送信しました`);
-    }
+    await this.ensureSendAudioFunctionExposed();
+    await this.flushRemoteAudioQueue();
 
     // ページ内のaudio要素を確認
     const audioElements = await this.page.evaluate(() => {

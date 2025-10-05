@@ -18,7 +18,7 @@ export interface AudioCaptureConfig {
   audioSelector: string;
   outputFile: string;
   chunkMs: number;
-  durationMs: number;
+  durationMs: number; // 0の場合は無期限、それ以外はミリ秒
 }
 
 export interface UiSelectors {
@@ -57,6 +57,18 @@ function parseInteger(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function parseMinutesToMs(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+  const minutes = Number.parseInt(value, 10);
+  if (!Number.isFinite(minutes) || minutes < 0) {
+    return fallback;
+  }
+  // 0の場合は0を返す（無期限）、それ以外は分をミリ秒に変換
+  return minutes === 0 ? 0 : minutes * 60 * 1000;
+}
+
 export function loadConfig(): AppConfig {
   const defaultAudioPath = path.resolve(process.cwd(), 'artifacts', 'ovice-audio.webm');
   const email = requiredEnv('OVICE_EMAIL');
@@ -73,7 +85,6 @@ export function loadConfig(): AppConfig {
       slowMo: parseInteger(process.env.OVICE_SLOWMO, 0),
       launchArgs: [
         '--use-fake-ui-for-media-stream',
-        '--use-fake-device-for-media-stream',
         '--autoplay-policy=no-user-gesture-required'
       ]
     },
@@ -81,7 +92,7 @@ export function loadConfig(): AppConfig {
       audioSelector: process.env.OVICE_AUDIO_SELECTOR ?? 'audio',
       outputFile: process.env.OVICE_AUDIO_FILE ?? defaultAudioPath,
       chunkMs: parseInteger(process.env.OVICE_AUDIO_CHUNK_MS, 1000),
-      durationMs: parseInteger(process.env.OVICE_CAPTURE_DURATION_MS, 0)
+      durationMs: parseMinutesToMs(process.env.OVICE_CAPTURE_DURATION_MINUTES, 0)
     },
     selectors: {
       mic: [

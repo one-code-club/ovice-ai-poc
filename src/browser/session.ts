@@ -6,7 +6,10 @@ export interface BrowserSession {
   context: BrowserContext;
 }
 
-export async function createBrowserSession(config: BrowserConfig): Promise<BrowserSession> {
+export async function createBrowserSession(
+  config: BrowserConfig,
+  initScript?: string
+): Promise<BrowserSession> {
   const browser = await chromium.launch({
     headless: config.headless,
     slowMo: config.slowMo,
@@ -18,6 +21,13 @@ export async function createBrowserSession(config: BrowserConfig): Promise<Brows
   });
 
   await context.grantPermissions(['microphone', 'camera']);
+
+  // init scriptがあれば、ページ作成前に注入
+  if (initScript) {
+    console.log('🔧 BrowserContextにinit scriptを注入中...');
+    await context.addInitScript(initScript);
+    console.log('✓ Init scriptを注入しました。');
+  }
 
   return { browser, context };
 }

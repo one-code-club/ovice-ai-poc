@@ -151,7 +151,13 @@ import WebSocket from 'ws';
     - After log-in
       - マイクをオンにして、チャイム音を２秒間再生してください。
 
-2. **AI 連携**
+2. **AI 連携の準備**
+   * Gemini LIVE APIを活用して次のことを処理するモジュールを作成する
+   - oViceスピーカーから入った音声データを書き起こし、Gemini 
+   - 受け取った音声データをGemini APIを使って書き起こし、変換したテキストを返す
+   
+     - 現在のチャイムやビープ音を流す部分は削除する
+  
 
    * 中継サーバ（Node/WS）を用意し、chunk を **OpenAI Realtime** か **Gemini Live** に転送→返答を音声ストリームで受け取り、ページに反映。([platform.openai.com][5])
 3. **堅牢化**

@@ -611,49 +611,6 @@ async function continueInBrowser(context: BrowserContext, page: Page): Promise<P
   return page;
 }
 
-async function playChimeSound(page: Page, durationMs: number): Promise<void> {
-  await page.evaluate((duration) => {
-    return new Promise((resolve) => {
-      const audioContext = new (window as any).AudioContext();
-      const now = audioContext.currentTime;
-      const durationSec = duration / 1000;
-
-      // チャイム音の和音（E5とG#5の組み合わせ）
-      // 1つ目の音: E5 (659.25Hz)
-      const oscillator1 = audioContext.createOscillator();
-      const gainNode1 = audioContext.createGain();
-      oscillator1.type = 'sine';
-      oscillator1.frequency.value = 659.25;
-      gainNode1.gain.setValueAtTime(0, now);
-      gainNode1.gain.linearRampToValueAtTime(0.3, now + 0.05);
-      gainNode1.gain.exponentialRampToValueAtTime(0.01, now + durationSec);
-      oscillator1.connect(gainNode1);
-      gainNode1.connect(audioContext.destination);
-      oscillator1.start(now);
-      oscillator1.stop(now + durationSec);
-
-      // 2つ目の音: G#5 (830.61Hz)
-      const oscillator2 = audioContext.createOscillator();
-      const gainNode2 = audioContext.createGain();
-      oscillator2.type = 'sine';
-      oscillator2.frequency.value = 830.61;
-      gainNode2.gain.setValueAtTime(0, now);
-      gainNode2.gain.linearRampToValueAtTime(0.3, now + 0.05);
-      gainNode2.gain.exponentialRampToValueAtTime(0.01, now + durationSec);
-      oscillator2.connect(gainNode2);
-      gainNode2.connect(audioContext.destination);
-      oscillator2.start(now);
-      oscillator2.stop(now + durationSec);
-
-      setTimeout(() => {
-        audioContext.close();
-        resolve(undefined);
-      }, duration);
-    });
-  }, durationMs);
-
-  console.log(`チャイム音を ${durationMs}ms 再生しました。`);
-}
 
 async function logPageState(page: Page, stepName: string): Promise<void> {
   const url = page.url();
@@ -696,6 +653,16 @@ export async function loginAndPrepare(
   selectors: UiSelectors
 ): Promise<Page> {
   let page = initialPage;
+
+  // ブラウザコンソールのログを最初から取得（init scriptのログを見逃さないため）
+  page.on('console', msg => {
+    const text = msg.text();
+    if (text.includes('[oVice]')) {
+      console.log('  📱', text);
+    } else if (text.includes('getUserMedia') || text.includes('AudioContext') || text.includes('Gemini')) {
+      console.log('  🔍', text);
+    }
+  });
 
   // ブラウザレベルのダイアログをハンドリング
   page.on('dialog', async (dialog) => {
@@ -750,12 +717,76 @@ export async function loginAndPrepare(
 
   await waitForSpaceUi(page, selectors);
   await ensureToggleOn(page, selectors.mic, 'マイク', false);
-  await ensureToggleOn(page, selectors.speaker, 'スピーカー', true); // スピーカーはオプショナル
+  // スピーカーはオンにしない（音声が再生されないようにするため）
+  console.log('ℹ スピーカーは意図的にオフのままにしています（音声再生を防ぐため）');
 
-  // チャイム音を２秒間再生
-  console.log('チャイム音を再生します...');
-  await playChimeSound(page, 2000);
+  console.log('マイクをONにしました。');
 
+  // デバッグ: 現在のストリームを確認
+  const beforeReplacement = await page.evaluate(() => {
+    const w = window as any;
+    const getUserMediaStr = navigator.mediaDevices.getUserMedia.toString();
+    return {
+      hasGeminiContext: !!w.__geminiAudioContext,
+      hasGeminiStream: !!w.__geminiMicStream,
+      queueLength: w.__geminiAudioQueue?.length || 0,
+      getUserMediaOverridden: getUserMediaStr.includes('getUserMedia呼び出し検出'),
+      getUserMediaPreview: getUserMediaStr.substring(0, 200)
+    };
+  });
+  console.log('🔍 ストリーム状態（マイクON直後）:', JSON.stringify(beforeReplacement, null, 2));
+
+  // さらに待機
+  await page.waitForTimeout(3000);
+
+  // デバッグ: getUserMediaが呼ばれたか、ストリームが使われているかを確認
+  const afterMicOn = await page.evaluate(() => {
+    const w = window as any;
+    const stream = w.__geminiMicStream;
+    
+    // RTCPeerConnectionを探す
+    const peerConnections: any[] = [];
+    Object.keys(w).forEach((key) => {
+      try {
+        const obj = w[key];
+        if (obj && obj.constructor && obj.constructor.name === 'RTCPeerConnection') {
+          const senders = obj.getSenders();
+          const audioSenders = senders.filter((s: any) => s.track?.kind === 'audio');
+          peerConnections.push({
+            key,
+            senderCount: senders.length,
+            audioSenderCount: audioSenders.length,
+            audioTracks: audioSenders.map((s: any) => ({
+              id: s.track.id,
+              label: s.track.label,
+              enabled: s.track.enabled
+            }))
+          });
+        }
+      } catch (e) {
+        // ignore
+      }
+    });
+    
+    return {
+      hasGeminiContext: !!w.__geminiAudioContext,
+      contextState: w.__geminiAudioContext?.state,
+      hasGeminiStream: !!stream,
+      queueLength: w.__geminiAudioQueue?.length || 0,
+      streamTracks: stream ? stream.getAudioTracks().map((t: MediaStreamTrack) => ({
+        id: t.id,
+        label: t.label,
+        enabled: t.enabled,
+        readyState: t.readyState
+      })) : [],
+      peerConnections,
+      getUserMediaCalled: !!w.__getUserMediaCalled
+    };
+  });
+  console.log('🔍 マイクON後の詳細状態:', JSON.stringify(afterMicOn, null, 2));
+
+  console.log('✓ oViceスペースの準備が完了しました。');
+  
   return page;
 }
 

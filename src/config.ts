@@ -1,6 +1,7 @@
 import { config as loadEnv } from 'dotenv';
 import path from 'node:path';
 import { SYSTEM_INSTRUCTIONS } from './gemini/systemInstructions.js';
+import { OPENAI_SYSTEM_INSTRUCTIONS } from './openai/systemInstructions.js';
 import { type RealtimeProvider, type RealtimeVoiceConfig } from './realtime/types.js';
 
 loadEnv();
@@ -160,7 +161,7 @@ function buildRealtimeConfig(provider: RealtimeProvider): RealtimeVoiceConfig {
           voice: process.env.OPENAI_REALTIME_VOICE ?? 'alloy',
           temperature: process.env.OPENAI_REALTIME_TEMPERATURE ? Number.parseFloat(process.env.OPENAI_REALTIME_TEMPERATURE) : 0.7,
           topP: process.env.OPENAI_REALTIME_TOP_P ? Number.parseFloat(process.env.OPENAI_REALTIME_TOP_P) : 0.9,
-          systemInstructions: SYSTEM_INSTRUCTIONS
+          systemInstructions: OPENAI_SYSTEM_INSTRUCTIONS
         }
       };
     }

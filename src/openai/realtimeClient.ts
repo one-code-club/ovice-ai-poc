@@ -10,30 +10,6 @@ export interface OpenAIRealtimeConfig {
   systemInstructions: string;
 }
 
-interface OpenAIRealtimeMessage {
-  type: string;
-  event_id?: string;
-  session?: {
-    default_model: string;
-    voice: string;
-  };
-  response?: {
-    output?: Array<{
-      type: string;
-      audio?: {
-        data: string;
-        format: string;
-      };
-      transcript?: string;
-    }>;
-    status?: string;
-  };
-  error?: {
-    code: string;
-    message: string;
-  };
-}
-
 export class OpenAIRealtimeClient implements RealtimeVoiceClient {
   private ws: WebSocket | null = null;
   private readonly config: OpenAIRealtimeConfig;
@@ -99,15 +75,10 @@ export class OpenAIRealtimeClient implements RealtimeVoiceClient {
     }
 
     if (this.isReady) {
-      console.log('💬 OpenAIに初回挨拶を促しています...');
-      const message = {
-        type: 'response.create',
-        response: {
-          modalities: ['audio', 'text'],
-          instructions: 'Please introduce yourself now.'
-        }
-      };
-      this.ws.send(JSON.stringify(message));
+      console.log('💬 OpenAI会話を開始（VADモードで自動応答）');
+      // サーバーVADが有効な場合、ユーザーが話すと自動的に応答が生成されます
+      // 必要に応じて初回挨拶を促すこともできます
+      console.log('   ユーザーが話すと、OpenAIが自動的に応答します');
     } else {
       console.warn('⚠ OpenAIセッションがまだ初期化中のため、startConversationは待機します。');
     }
@@ -124,12 +95,10 @@ export class OpenAIRealtimeClient implements RealtimeVoiceClient {
       return;
     }
 
+    // OpenAI Realtime APIは audio フィールドに直接base64文字列を期待します
     const message = {
       type: 'input_audio_buffer.append',
-      audio: {
-        data: audioData,
-        format: this.getAudioFormatFromMime(mimeType)
-      }
+      audio: audioData
     };
 
     this.ws.send(JSON.stringify(message));
@@ -168,7 +137,8 @@ export class OpenAIRealtimeClient implements RealtimeVoiceClient {
   }
 
   getPreferredSampleRate(): number {
-    return 16000;
+    // OpenAI Realtime APIは24kHzをサポート
+    return 24000;
   }
 
   getProviderLabel(): string {
@@ -176,78 +146,118 @@ export class OpenAIRealtimeClient implements RealtimeVoiceClient {
   }
 
   private handleMessage(raw: WebSocket.Data): void {
-    let message: OpenAIRealtimeMessage;
+    let message: any;
     try {
-      message = JSON.parse(raw.toString()) as OpenAIRealtimeMessage;
+      message = JSON.parse(raw.toString());
     } catch (error) {
       console.error('❌ OpenAIメッセージの解析に失敗:', error);
       return;
     }
 
-    if (message.type === 'session.created' && message.session) {
+    // 🔍 全てのイベントをログ出力（デバッグ用）
+    console.log('📨 OpenAIイベント:', message.type);
+
+    // セッション作成
+    if (message.type === 'session.created') {
       this.isReady = true;
-      console.log('✓ OpenAIセッションが作成されました。音声出力ボイス:', message.session.voice);
-      this.sendSystemInstruction();
+      console.log('✓ OpenAIセッションが作成されました');
+      console.log('  - モデル:', message.session?.model);
+      console.log('  - ボイス:', message.session?.voice);
+      console.log('  - 入力音声フォーマット:', message.session?.input_audio_format);
+      console.log('  - 出力音声フォーマット:', message.session?.output_audio_format);
+      console.log('  - ターン検出:', message.session?.turn_detection);
+      this.configureSession();
       return;
     }
 
-    if (message.type === 'response.delta' || message.type === 'response.completed') {
-      this.handleResponse(message);
+    // セッション更新
+    if (message.type === 'session.updated') {
+      console.log('✓ OpenAIセッションが更新されました');
       return;
     }
 
-    if (message.type === 'error' && message.error) {
-      const err = new Error(`OpenAI Error ${message.error.code}: ${message.error.message}`);
+    // 音声データ受信
+    if (message.type === 'response.audio.delta') {
+      if (message.delta && this.messageHandler) {
+        console.log('🔊 OpenAI音声データ受信:', message.delta.length, '文字');
+        this.messageHandler(message.delta);
+      }
+      return;
+    }
+
+    // 音声書き起こし受信
+    if (message.type === 'response.audio_transcript.delta') {
+      console.log('📝 OpenAI書き起こし:', message.delta);
+      return;
+    }
+
+    // 応答完了
+    if (message.type === 'response.done') {
+      console.log('✓ OpenAI応答完了');
+      return;
+    }
+
+    // 入力音声バッファコミット
+    if (message.type === 'input_audio_buffer.committed') {
+      console.log('✓ 音声入力がコミットされました');
+      return;
+    }
+
+    // 会話アイテム作成
+    if (message.type === 'conversation.item.created') {
+      console.log('✓ 会話アイテム作成:', message.item?.type);
+      return;
+    }
+
+    // エラー
+    if (message.type === 'error') {
+      const err = new Error(`OpenAI Error ${message.error?.code}: ${message.error?.message}`);
+      console.error('❌', err.message);
       if (this.errorHandler) {
         this.errorHandler(err);
-      } else {
-        console.error(err);
       }
       return;
     }
-  }
 
-  private handleResponse(message: OpenAIRealtimeMessage): void {
-    const outputs = message.response?.output ?? [];
-    for (const output of outputs) {
-      if (output.type === 'audio' && output.audio?.data) {
-        if (this.messageHandler) {
-          this.messageHandler(output.audio.data);
-        }
-      }
-      if (output.transcript) {
-        console.log('💬 OpenAIテキスト応答:', output.transcript);
-      }
+    // その他のイベント（デバッグ用）
+    if (message.type !== 'response.audio.delta') {
+      console.log('  📋 イベント詳細:', JSON.stringify(message, null, 2).substring(0, 500));
     }
   }
 
-  private sendSystemInstruction(): void {
+  private configureSession(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
     }
 
-    const message = {
-      type: 'response.create',
-      response: {
+    console.log('🔧 OpenAIセッションを設定中...');
+    const sessionConfig = {
+      type: 'session.update',
+      session: {
+        modalities: ['text', 'audio'],
         instructions: this.config.systemInstructions,
-        modalities: ['text']
+        voice: this.config.voice,
+        input_audio_format: 'pcm16',
+        output_audio_format: 'pcm16',
+        input_audio_transcription: {
+          model: 'whisper-1'
+        },
+        turn_detection: {
+          type: 'server_vad',
+          threshold: 0.5,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 500
+        },
+        temperature: this.config.temperature,
+        max_response_output_tokens: 4096
       }
     };
-    this.ws.send(JSON.stringify(message));
-  }
 
-  private getAudioFormatFromMime(mimeType: string): string {
-    switch (mimeType) {
-      case 'audio/pcm':
-        return 'pcm16';
-      case 'audio/wav':
-        return 'wav';
-      case 'audio/webm':
-        return 'webm';
-      default:
-        console.warn(`未対応のMIMEタイプを受信: ${mimeType}。pcm16として扱います。`);
-        return 'pcm16';
-    }
+    console.log('  - システム指示:', this.config.systemInstructions.substring(0, 100) + '...');
+    console.log('  - ボイス:', this.config.voice);
+    console.log('  - VAD有効: サーバーサイド');
+    this.ws.send(JSON.stringify(sessionConfig));
   }
 }
+
 

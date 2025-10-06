@@ -173,6 +173,12 @@ export class OpenAIRealtimeClient implements RealtimeVoiceClient {
     // セッション更新
     if (message.type === 'session.updated') {
       console.log('✓ OpenAIセッションが更新されました');
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('📋 更新後のセッション設定:');
+      console.log('  - Instructions:', message.session?.instructions?.substring(0, 200) + '...');
+      console.log('  - Voice:', message.session?.voice);
+      console.log('  - Temperature:', message.session?.temperature);
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       return;
     }
 
@@ -253,8 +259,13 @@ export class OpenAIRealtimeClient implements RealtimeVoiceClient {
       }
     };
 
-    console.log('  - システム指示:', this.config.systemInstructions.substring(0, 100) + '...');
+    // デバッグ: システム指示の完全な内容を出力
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('📋 送信するシステム指示（完全版）:');
+    console.log(this.config.systemInstructions);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('  - ボイス:', this.config.voice);
+    console.log('  - Temperature:', this.config.temperature);
     console.log('  - VAD有効: サーバーサイド');
     this.ws.send(JSON.stringify(sessionConfig));
   }

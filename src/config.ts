@@ -3,6 +3,7 @@ import path from 'node:path';
 import { SYSTEM_INSTRUCTIONS } from './gemini/systemInstructions.js';
 import { OPENAI_SYSTEM_INSTRUCTIONS } from './openai/systemInstructions.js';
 import { type RealtimeProvider, type RealtimeVoiceConfig } from './realtime/types.js';
+import { encodeLocationToken } from './ovice/url.js';
 
 loadEnv();
 
@@ -36,6 +37,11 @@ export interface AppConfig {
   audio: AudioCaptureConfig;
   selectors: UiSelectors;
   realtime: RealtimeVoiceConfig;
+  initialLocation?: {
+    x: number;
+    y: number;
+  };
+  initialLocationToken?: string;
 }
 
 function requiredEnv(name: string): string {
@@ -61,6 +67,29 @@ function parseInteger(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function buildBaseUrlWithLocation(baseUrl: string, token?: string): string {
+  if (!token) {
+    return baseUrl;
+  }
+
+  const url = new URL(baseUrl);
+
+  const normalizedToken = token.startsWith('@') ? token : `@${token}`;
+
+  if (url.hash && url.hash.startsWith('#@')) {
+    url.hash = `#${normalizedToken}`;
+    return url.toString();
+  }
+
+  if (!url.pathname.endsWith('/')) {
+    url.pathname = `${url.pathname}/`;
+  }
+
+  url.pathname = url.pathname.replace(/@[^/]+$/, '');
+  url.pathname += normalizedToken;
+  return url.toString();
+}
+
 function parseMinutesToMs(value: string | undefined, fallback: number): number {
   if (!value) {
     return fallback;
@@ -79,8 +108,20 @@ export function loadConfig(): AppConfig {
   const password = requiredEnv('OVICE_PASSWORD');
   const realtimeProvider = (process.env.REALTIME_PROVIDER ?? 'GEMINI').toUpperCase() as RealtimeProvider;
 
+  // 初期位置の読み込み（両方が設定されている場合のみ有効）
+  const initialLocationX = process.env.INITIAL_LOCATION_X ? Number.parseInt(process.env.INITIAL_LOCATION_X, 10) : undefined;
+  const initialLocationY = process.env.INITIAL_LOCATION_Y ? Number.parseInt(process.env.INITIAL_LOCATION_Y, 10) : undefined;
+  const initialLocation =
+    initialLocationX !== undefined && initialLocationY !== undefined &&
+    Number.isFinite(initialLocationX) && Number.isFinite(initialLocationY)
+      ? { x: initialLocationX, y: initialLocationY }
+      : undefined;
+  const initialLocationToken = initialLocation
+    ? encodeLocationToken(initialLocation.x, initialLocation.y)
+    : undefined;
+
   return {
-    baseUrl: process.env.OVICE_BASE_URL ?? 'https://occ.ovice.in',
+    baseUrl: buildBaseUrlWithLocation(process.env.OVICE_BASE_URL ?? 'https://occ.ovice.in', initialLocationToken),
     credentials: {
       email,
       password
@@ -131,7 +172,9 @@ export function loadConfig(): AppConfig {
         'button:has(svg):has-text("speaker")'
       ]
     },
-    realtime: buildRealtimeConfig(realtimeProvider)
+    realtime: buildRealtimeConfig(realtimeProvider),
+    initialLocation,
+    initialLocationToken
   };
 }
 

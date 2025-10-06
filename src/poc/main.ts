@@ -3,6 +3,7 @@ import { createBrowserSession } from '../browser/session.js';
 import { loginAndPrepare } from '../ovice/login.js';
 import { AudioBridge } from '../gemini/audioBridge.js';
 import { createRealtimeClient } from '../realtime/clientFactory.js';
+import { moveToInitialPosition } from '../ovice/avatarControl.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -59,6 +60,22 @@ async function main(): Promise<void> {
     page = await loginAndPrepare(session.context, page, config.baseUrl, config.credentials, config.selectors);
 
     console.log('✓ oViceスペースに入りました。');
+    
+    // デバッグ: 設定値を確認
+    console.log('\n🔍 === 初期位置設定の確認 ===');
+    console.log('config.initialLocation:', config.initialLocation);
+    console.log('環境変数 INITIAL_LOCATION_X:', process.env.INITIAL_LOCATION_X);
+    console.log('環境変数 INITIAL_LOCATION_Y:', process.env.INITIAL_LOCATION_Y);
+    console.log('=========================\n');
+    
+    // 初期位置が設定されている場合、アバターを移動
+    if (config.initialLocation) {
+      console.log(`📍 アバターを初期位置に移動します: (${config.initialLocation.x}, ${config.initialLocation.y})`);
+      await moveToInitialPosition(page, config.initialLocation.x, config.initialLocation.y);
+    } else {
+      console.log('⚠ 初期位置が設定されていないため、アバターの移動をスキップします。');
+      console.log('  ヒント: .envファイルにINITIAL_LOCATION_XとINITIAL_LOCATION_Yを設定してください。');
+    }
     
     // デバッグ: マイク設定の状態を確認
     console.log('\n🔍 === マイク設定の診断 ===');
